@@ -82,6 +82,7 @@ void Producer::Init(v8::Local<v8::Object> exports) {
 
   Nan::SetPrototypeMethod(tpl, "setPartitioner", NodeSetPartitioner);
   Nan::SetPrototypeMethod(tpl, "produce", NodeProduce);
+  Nan::SetPrototypeMethod(tpl, "produceMany", NodeProduceMany);
   Nan::SetPrototypeMethod(tpl, "produceSync", NodeProduceSync);
 
     // connect. disconnect. resume. pause. get meta data
@@ -194,6 +195,41 @@ void Producer::Disconnect() {
   }
 }
 
+Baton Producer::ProduceMany(std::vector<ProducerMessage*> msgs) {
+  RdKafka::ErrorCode response_code;
+
+  if (IsConnected()) {
+    scoped_mutex_lock lock(m_connection_lock);
+    if (IsConnected()) {
+      RdKafka::Producer* producer = dynamic_cast<RdKafka::Producer*>(m_client);
+
+      for (unsigned int i = 0; i < msgs.size(); i++) {
+        ProducerMessage* msg = msgs.at(i);
+
+        if (msg->m_key.empty()) {
+          response_code = producer->produce(msg->GetTopic(), msg->m_partition,
+                RdKafka::Producer::RK_MSG_FREE, msg->Payload(), msg->Size(), NULL, NULL);
+        } else {
+          response_code = producer->produce(msg->GetTopic(), msg->m_partition,
+                RdKafka::Producer::RK_MSG_FREE, msg->Payload(), msg->Size(), &msg->m_key, NULL);
+        }
+
+        if (response_code != RdKafka::ERR_NO_ERROR) {
+          return Baton(response_code);
+        }
+      }
+
+      Poll();
+    } else {
+      return Baton(RdKafka::ERR__STATE);
+    }
+  } else {
+    return Baton(RdKafka::ERR__STATE);
+  }
+
+  return Baton(RdKafka::ERR_NO_ERROR);
+}
+
 Baton Producer::Produce(ProducerMessage* msg) {
   if (msg->m_key.empty()) {
     return Produce(msg->Payload(), msg->Size(), msg->GetTopic(),
@@ -258,7 +294,7 @@ NAN_METHOD(Producer::NodeProduceSync) {
   // Second parameter is a topic config
   Topic* topic = ObjectWrap::Unwrap<Topic>(info[1].As<v8::Object>());
 
-  ProducerMessage* message = new ProducerMessage(obj, topic);
+  ProducerMessage* message = new ProducerMessage(obj, topic, NULL);
   if (message->IsEmpty()) {
     if (message->m_errstr.empty()) {
       return Nan::ThrowError("Need to specify a message to send");
@@ -279,6 +315,55 @@ NAN_METHOD(Producer::NodeProduceSync) {
   }
 }
 
+NAN_METHOD(Producer::NodeProduceMany) {
+  Nan::HandleScope scope;
+
+  if (info.Length() < 2 || !info[1]->IsObject()) {
+    // Just throw an exception
+    return Nan::ThrowError("Need to specify message array and topic");
+  }
+
+  v8::Local<v8::Object> obj = info[0].As<v8::Object>();
+  v8::Local<v8::String> messagesField = Nan::New("messages").ToLocalChecked();
+  Nan::MaybeLocal<v8::Value> message_buffers = Nan::Get(obj, messagesField);
+  if (message_buffers.IsEmpty()) {
+    return Nan::ThrowError("Need to specify a message array to send");
+  }
+  v8::Local<v8::Array> buffers = v8::Local<v8::Array>::Cast(message_buffers.ToLocalChecked());
+
+  // Second parameter is a topic config
+  Topic* topic = ObjectWrap::Unwrap<Topic>(info[1].As<v8::Object>());
+
+  std::vector<ProducerMessage*> messages;
+
+  for (unsigned int i = 0; i < buffers->Length(); i++) {
+    v8::Local<v8::Value> msg = buffers->Get(i).As<v8::Value>();
+    ProducerMessage* message = new ProducerMessage(obj, topic, &msg);
+    if (message->IsEmpty()) {
+      if (message->m_errstr.empty()) {
+        return Nan::ThrowError("Need to specify a message to send");
+      } else {
+        return Nan::ThrowError(message->m_errstr.c_str());
+      }
+    }
+    messages.push_back(message);
+  }
+
+  Producer* producer = ObjectWrap::Unwrap<Producer>(info.This());
+
+  if (info.Length() < 3 || !info[2]->IsFunction()) {
+    return Nan::ThrowError("You must provide a callback");
+  }
+
+  v8::Local<v8::Function> cb = info[2].As<v8::Function>();
+
+  Nan::Callback * callback = new Nan::Callback(cb);
+
+  Nan::AsyncQueueWorker(
+    new Workers::ProducerProduceMany(callback, producer, messages));
+  info.GetReturnValue().Set(Nan::Null());
+}
+
 NAN_METHOD(Producer::NodeProduce) {
   Nan::HandleScope scope;
 
@@ -294,7 +379,7 @@ NAN_METHOD(Producer::NodeProduce) {
   // Second parameter is a topic config
   Topic* topic = ObjectWrap::Unwrap<Topic>(info[1].As<v8::Object>());
 
-  ProducerMessage* message = new ProducerMessage(obj, topic);
+  ProducerMessage* message = new ProducerMessage(obj, topic, NULL);
   if (message->IsEmpty()) {
     if (message->m_errstr.empty()) {
       return Nan::ThrowError("Need to specify a message to send");
@@ -410,7 +495,7 @@ NAN_METHOD(Producer::NodeDisconnect) {
  * @sa NodeKafka::Consumer::Produce
  */
 
-ProducerMessage::ProducerMessage(v8::Local<v8::Object> obj, Topic * topic):
+ProducerMessage::ProducerMessage(v8::Local<v8::Object> obj, Topic * topic, v8::Local<v8::Value>* msg):
   m_topic(topic),
   m_is_empty(true) {
   // We have this bad boy now
@@ -422,40 +507,45 @@ ProducerMessage::ProducerMessage(v8::Local<v8::Object> obj, Topic * topic):
     m_partition = RdKafka::Topic::PARTITION_UA;  // this is just -1
   }
 
-  // This one is a buffer
-  v8::Local<v8::String> messageField = Nan::New("message").ToLocalChecked();
-  if (Nan::Has(obj, messageField).FromMaybe(false)) {
-    Nan::MaybeLocal<v8::Value> buffer_pre_object =
-      Nan::Get(obj, messageField);
-
-    if (buffer_pre_object.IsEmpty()) {
-      // this is an error object then
-      // errstr = "Missing message parameter";
-      return;
-    }
-
-    v8::Local<v8::Value> buffer_value = buffer_pre_object.ToLocalChecked();
-
-    if (!node::Buffer::HasInstance(buffer_value)) {
-      return;
-    }
-
-    v8::Local<v8::Object> buffer_object = buffer_value->ToObject();
-
-    // v8 handles the garbage collection here so we need to make a copy of
-    // the buffer or assign the buffer to a persistent handle.
-
-    // I'm not sure which would be the more performant option. I assume
-    // the persistent handle would be but for now we'll try this one
-    // which should be more memory-efficient and allow v8 to dispose of the
-    // buffer sooner
-
-    m_buffer_length = node::Buffer::Length(buffer_object);
-    m_buffer_data = malloc(m_buffer_length);
-    memcpy(m_buffer_data, node::Buffer::Data(buffer_object), m_buffer_length);
+  v8::Local<v8::Value> buffer_value;
+  if (msg) {
+    buffer_value = *msg;
   } else {
+    // This one is a buffer
+    v8::Local<v8::String> messageField = Nan::New("message").ToLocalChecked();
+    if (Nan::Has(obj, messageField).FromMaybe(false)) {
+      Nan::MaybeLocal<v8::Value> buffer_pre_object =
+        Nan::Get(obj, messageField);
+
+      if (buffer_pre_object.IsEmpty()) {
+        // this is an error object then
+        // errstr = "Missing message parameter";
+        return;
+      }
+
+      buffer_value = buffer_pre_object.ToLocalChecked();
+    } else {
+      return;
+    }
+  }
+
+  if (!node::Buffer::HasInstance(buffer_value)) {
     return;
   }
+
+  v8::Local<v8::Object> buffer_object = buffer_value->ToObject();
+
+  // v8 handles the garbage collection here so we need to make a copy of
+  // the buffer or assign the buffer to a persistent handle.
+
+  // I'm not sure which would be the more performant option. I assume
+  // the persistent handle would be but for now we'll try this one
+  // which should be more memory-efficient and allow v8 to dispose of the
+  // buffer sooner
+
+  m_buffer_length = node::Buffer::Length(buffer_object);
+  m_buffer_data = malloc(m_buffer_length);
+  memcpy(m_buffer_data, node::Buffer::Data(buffer_object), m_buffer_length);
 
   // Currently a valid message
   m_is_empty = false;

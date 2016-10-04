@@ -185,6 +185,46 @@ void ProducerProduce::HandleErrorCallback() {
   callback->Call(argc, argv);
 }
 
+ProducerProduceMany::ProducerProduceMany(
+    Nan::Callback *callback,
+    Producer *producer,
+    std::vector<ProducerMessage*> messages):
+  ErrorAwareWorker(callback),
+  producer(producer),
+  messages(messages) {}
+
+ProducerProduceMany::~ProducerProduceMany() {
+  for (unsigned int i = 0; i < messages.size(); i++) {
+    delete messages.at(i);
+  }
+}
+
+void ProducerProduceMany::Execute() {
+  Baton b = producer->ProduceMany(messages);
+
+  if (b.err() != RdKafka::ERR_NO_ERROR) {
+    SetErrorCode(b.err());
+  }
+}
+
+void ProducerProduceMany::HandleOKCallback() {
+  Nan::HandleScope scope;
+
+  const unsigned int argc = 1;
+  v8::Local<v8::Value> argv[argc] = { Nan::Null() };
+
+  callback->Call(argc, argv);
+}
+
+void ProducerProduceMany::HandleErrorCallback() {
+  Nan::HandleScope scope;
+
+  const unsigned int argc = 1;
+  v8::Local<v8::Value> argv[argc] = { GetErrorObject() };
+
+  callback->Call(argc, argv);
+}
+
 /**
  * @brief Consumer connect worker.
  *

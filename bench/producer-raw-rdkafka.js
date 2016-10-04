@@ -6,6 +6,7 @@
  * This software may be modified and distributed under the terms
  * of the MIT license.  See the LICENSE.txt file for details.
  */
+process.env.UV_THREADPOOL_SIZE = 16;
 
 var Kafka = require('../');
 var crypto = require('crypto');
@@ -20,7 +21,9 @@ var done = false;
 var host = process.argv[2] || '127.0.0.1:9092';
 var topicName = process.argv[3] || 'test';
 var compression = process.argv[4] || 'gzip';
-var MAX = process.argv[5] || 100000;
+var MAX = process.argv[5] || 200000;
+var many = false;
+var manyCount = 5;
 
 var producer = new Kafka.Producer({
   'metadata.broker.list': host,
@@ -73,14 +76,16 @@ crypto.randomBytes(4096, function(ex, buffer) {
           console.log(e);
           errors += 1;
         } else {
-          verifiedComplete += 1;
+          verifiedComplete += many ? manyCount : 1;
         }
-        count += 1;
-        totalComplete += 1;
-        if (totalComplete === MAX) {
+        count += many ? manyCount : 1;
+        totalComplete += many ? manyCount : 1;
+        if (totalComplete >= MAX) {
           shutdown();
         }
       };
+
+      //console.error(producer);
 
       var sendMessage = function() {
         producer.produce({
@@ -92,8 +97,18 @@ crypto.randomBytes(4096, function(ex, buffer) {
           setImmediate(sendMessage);
         }
       };
+      var sendMessageMany = function() {
+        producer.produceMany({
+          topic: topic,
+          messages: [buffer, buffer, buffer, buffer, buffer]
+        }, x);
+        if (total < MAX) {
+          total += manyCount;
+          setImmediate(sendMessageMany);
+        }
+      };
 
-      sendMessage();
+      many ? sendMessageMany() : sendMessage();
 
     })
     .on('error', function(err) {
@@ -110,7 +125,6 @@ process.once('SIGHUP', shutdown);
 
 function shutdown(e) {
   done = true;
-
   clearInterval(interval);
 
   var killTimer = setTimeout(function() {

@@ -204,6 +204,21 @@ class ProducerProduce : public ErrorAwareWorker {
   NodeKafka::ProducerMessage * message;
 };
 
+class ProducerProduceMany : public ErrorAwareWorker {
+ public:
+  ProducerProduceMany(
+    Nan::Callback*, NodeKafka::Producer*, std::vector<NodeKafka::ProducerMessage*>);
+  ~ProducerProduceMany();
+
+  void Execute();
+  void HandleOKCallback();
+  void HandleErrorCallback();
+
+ private:
+  NodeKafka::Producer * producer;
+  std::vector<NodeKafka::ProducerMessage*> messages;
+};
+
 class ConsumerConnect : public ErrorAwareWorker {
  public:
   ConsumerConnect(Nan::Callback*, NodeKafka::Consumer*);

@@ -26,7 +26,7 @@ namespace NodeKafka {
 
 class ProducerMessage {
  public:
-  explicit ProducerMessage(v8::Local<v8::Object>, NodeKafka::Topic*);
+  explicit ProducerMessage(v8::Local<v8::Object>, NodeKafka::Topic*, v8::Local<v8::Value>*);
   ~ProducerMessage();
 
   void* Payload();
@@ -56,6 +56,7 @@ class Producer : public Connection {
   void Poll();
 
   Baton Produce(ProducerMessage* msg);
+  Baton ProduceMany(std::vector<ProducerMessage*> msgs);
   Baton Produce(void*, size_t, RdKafka::Topic*, int32_t, std::string*);
   std::string Name();
 
@@ -72,6 +73,7 @@ class Producer : public Connection {
  private:
   static NAN_METHOD(NodeProduceSync);
   static NAN_METHOD(NodeProduce);
+  static NAN_METHOD(NodeProduceMany);
   static NAN_METHOD(NodeOnDelivery);
   static NAN_METHOD(NodeSetPartitioner);
   static NAN_METHOD(NodeConnect);
